@@ -4,8 +4,6 @@
 # LICENSE file in the root directory of this source tree. An additional grant
 # of patent rights can be found in the PATENTS file in the same directory.
 
-
-import threading
 import time
 from queue import Queue
 import uuid
@@ -16,13 +14,13 @@ from parlai.mturk.core.shared_utils import print_and_log, THREAD_SHORT_SLEEP, \
                                            THREAD_MTURK_POLLING_SLEEP
 
 # Special act messages for failure states
-MTURK_DISCONNECT_MESSAGE = '[DISCONNECT]' # Turker disconnected from conv
-TIMEOUT_MESSAGE = '[TIMEOUT]' # the Turker did not respond but didn't return
-RETURN_MESSAGE = '[RETURNED]' # the Turker returned the HIT
+MTURK_DISCONNECT_MESSAGE = '[DISCONNECT]'  # Turker disconnected from conv
+TIMEOUT_MESSAGE = '[TIMEOUT]'  # the Turker did not respond but didn't return
+RETURN_MESSAGE = '[RETURNED]'  # the Turker returned the HIT
 
 
 class MTurkAgent(Agent):
-    """Base class for an MTurkAgent that can act in a ParlAI world"""
+    """Base class for an MTurkAgent that can act in a ParlAI world."""
 
     # MTurkAgent Possible Statuses
     ASSIGNMENT_NOT_DONE = 'NotDone'
@@ -31,6 +29,7 @@ class MTurkAgent(Agent):
     ASSIGNMENT_REJECTED = 'Rejected'
 
     def __init__(self, opt, manager, hit_id, assignment_id, worker_id):
+        """Set up initial Turker states and collect HIT status."""
         super().__init__(opt)
 
         self.conversation_id = None
@@ -42,8 +41,8 @@ class MTurkAgent(Agent):
         self.some_agent_disconnected = False
         self.hit_is_abandoned = False
         self.hit_is_expired = False
-        self.hit_is_accepted = False # state from Amazon MTurk system
-        self.hit_is_returned = False # state from Amazon MTurk system
+        self.hit_is_accepted = False  # state from Amazon MTurk system
+        self.hit_is_returned = False  # state from Amazon MTurk system
         self.disconnected = False
         self.task_group_id = manager.task_group_id
 
@@ -55,7 +54,7 @@ class MTurkAgent(Agent):
         # self.check_hit_status_thread.start()
 
     def _check_hit_status(self):
-        """Monitor and update the HIT status by polling"""
+        """Monitor and update the HIT status by polling."""
         # TODO-1 replace with code that subscribes to notifs to update status
         # Check if HIT is accepted
         while True:
@@ -81,31 +80,33 @@ class MTurkAgent(Agent):
                     # available HITs consistent with the number of
                     # conversations left.
                     if self.is_in_task():
-                        print_and_log(('Worker has returned the HIT. Since '
-                            'the worker is already in a task conversation, '
-                            'we are expiring the HIT.'), False)
+                        print_and_log((
+                            'Worker has returned the HIT. Since the worker is '
+                            'already in a task conversation, we are expiring '
+                            'the HIT.'), False)
                         self.manager.expire_hit(hit_id=self.hit_id)
                     else:
-                        print_and_log(('Worker has returned the HIT. Since '
-                            'the worker is still in onboarding, we will not '
-                            'expire the HIT.'), False)
+                        print_and_log((
+                            'Worker has returned the HIT. Since the worker is '
+                            'still in onboarding we will not expire the HIT.'),
+                            False)
                     # we will not be using this MTurkAgent object for another
                     # worker, so no need to check its status anymore
                     return
             time.sleep(THREAD_MTURK_POLLING_SLEEP)
 
     def is_in_task(self):
-        """Use conversation_id to determine if an agent is in a task"""
+        """Use conversation_id to determine if an agent is in a task."""
         if self.conversation_id:
             return 't_' in self.conversation_id
         return False
 
     def observe(self, msg):
-        """Send an agent a message through the mturk manager"""
+        """Send an agent a message through the mturk manager."""
         self.manager.send_message(self.worker_id, self.assignment_id, msg)
 
     def get_new_act_message(self):
-        """Get a new act message if one exists, return None otherwise"""
+        """Get a new act message if one exists, return None otherwise."""
         # Check if Turker sends a message
         if not self.msg_queue.empty():
             msg = self.msg_queue.get()
@@ -134,9 +135,10 @@ class MTurkAgent(Agent):
         return None
 
     def act(self, timeout=None, blocking=True):
-        """Sends a message to other agents in the world. If blocking, this
-        will wait for the message to come in so it can be sent. Otherwise
-        it will return None.
+        """Send a message to other agents in the world.
+
+        If blocking, this will wait for the message to come in so it can be
+        sent. Otherwise it will return None.
         """
         if not blocking:
             return self.get_new_act_message()
@@ -175,7 +177,7 @@ class MTurkAgent(Agent):
 
     def change_conversation(self, conversation_id, agent_id, change_callback):
         """Handle changing a conversation for an agent, takes a callback for
-        when the command is acknowledged
+        when the command is acknowledged.
         """
         self.id = agent_id
         self.conversation_id = conversation_id
@@ -193,7 +195,8 @@ class MTurkAgent(Agent):
 
     def episode_done(self):
         """Return whether or not this agent believes the conversation to
-        be done"""
+        be done.
+        """
         if self.manager.get_agent_work_status(self.assignment_id) == \
                 self.ASSIGNMENT_NOT_DONE:
             return False
