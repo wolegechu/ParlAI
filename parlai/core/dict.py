@@ -11,7 +11,6 @@ import copy
 import numpy as np
 import nltk
 import os
-import re
 
 
 def escape(s):
