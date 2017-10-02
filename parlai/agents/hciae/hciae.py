@@ -10,6 +10,8 @@ import copy
 import random
 import numpy as np
 
+from modules import *
+
 class HCIAEAgent(Agent):
     """ HCIAEAgent.
     """
@@ -40,6 +42,12 @@ class HCIAEAgent(Agent):
             self.longest_label = 1
 
             lr = opt['learning_rate']
+
+            emb = opt['embeddingsize']
+            self.q_encoder = QueryEncoder(opt, self.dict)
+            self.H_encoder = HistoryEncoder(opt, self.dict)
+            self.att_image = AttM(emb)
+            self.att_history = AttM(emb)
             #if opt['optimizer'] = 'sgd':
                 #self.optimizers = {'haciae': optim.SGD()}
             
@@ -67,7 +75,7 @@ class HCIAEAgent(Agent):
             prev_dialogue = prev_dialogue + ' __END__ ' + self.observation['labels'][0]
             observation['text'] = prev_dialogue + '\n' + observation['text']
         else:
-            self.img_feature = observation['image'].items()[0][1]
+            self.img_feature = torch.from_numpy(observation['image'].items()[0][1])
         self.observation = observation
         self.episode_done = observation['episode_done']
         return observation
@@ -171,6 +179,14 @@ class HCIAEAgent(Agent):
     def predict(self, xs, cands, ys=None):
         is_training = ys is not None
         inputs = [Variable(x, volatile=is_training) for x in xs]
+        history, query = input[0], input[1]
+        history_lengths, query_lengths = input[2], input[3]
+        img = Variable(self.img_feature)
+
+        query = self.q_encoder(query, query_lengths)
+        history = self.H_encoder(history, history_lengths)
+        return self.img_feature
+
     
 
     def decode(self, output_embeddings, ys=None):
@@ -178,3 +194,21 @@ class HCIAEAgent(Agent):
         hn = output_embeddings.unsqueeze(0).expand(self.expand(
             self.opt['rnn_layers'], batchsize, output_embeddings.size(1)))
 
+
+    def batch_act(self, observations):
+        batchsize = len(observations)
+        batch_reply = [{'id': self.getID()} for _ in range(batchsize)]
+
+        xs, ys, cands, valid_inds = self.batchify(observations)
+
+        if xs is None or len(xs[1]) == 0:
+            return batch_reply
+
+        # Either train or predict
+        predictions = self.predict(xs, cands, ys)
+
+        for i in range(len(valid_inds)):
+            #self.answers[valid_inds[i]] = predictions[i][0]
+            batch_reply[valid_inds[i]]['text'] = predictions
+            #batch_reply[valid_inds[i]]['text_candidates'] = predictions[i]
+        return batch_reply

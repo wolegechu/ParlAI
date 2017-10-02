@@ -61,17 +61,20 @@ def sort_embeddings(embeddings, lens):
 
 class QueryEncoder(nn.Module):
     def __init__(self, opt, dictionary):
-        super().__init__(
+        super().__init__()
         emb = opt['embeddingsize']
         hsz = opt['hiddensize']
         nlayer = opt['numlayers']
+        
+        self.num_layers = nlayer
+        self.hidden_size = hsz
 
         self.embedding = nn.Embedding(len(dictionary), emb)
         self.q_encoder = nn.LSTM(emb, hsz, nlayer)
 
     def forward(self, input, lengths):
         batch_size = input.size(0)
-
+        print(input.size())
         queries = self.embedding(input)
         data = sort_embeddings(queries, lengths)
 
@@ -84,3 +87,79 @@ class QueryEncoder(nn.Module):
 
         return output_embedding
 
+# class AttM(nn.Module):
+#     def __init__(self, t, d):
+#         super(att_i, self).__init__()
+#         self.t = t
+#         self.d = d
+#         self.W_i = nn.parameter.Parameter(torch.Tensor(t, d))
+#         self.W_c = nn.parameter.Parameter(torch.Tensor(t, d))
+#         self.w_a = nn.parameter.Parameter(torch.Tensor(t))
+#         self.soft_max = nn.Softmax()
+#         self.tanh = nn.Tanh()
+#         self.reset_parameters()
+        
+#     def reset_parameters(self):
+#         stdv = 1. / math.sqrt(self.d)
+#         self.W_i.data.uniform_(-stdv, stdv)
+#         self.W_c.data.uniform_(-stdv, stdv)
+#         self.w_a.data.uniform_(-stdv, stdv)
+
+    
+#     def forward(self, M, m):
+#         # z_i = w_a.t x tanh(W_i x M_i + W_c x m_c x 1.t)
+#         # W_i, W_c t*d
+#         # M 8*512(d)*49(t) m 8*512
+#         one = Variable(torch.ones(self.t), requires_grad=False)
+#         M = torch.transpose(M, 1, 2) # 8*49(t)*512(d)
+#         a1 = M.matmul(self.W_i.t())
+#         a2 = m.matmul(self.W_c.t()).unsqueeze(2)
+#         a2 = a2.matmul(one.unsqueeze(0))
+#         z_i = self.tanh(a1 + a2).matmul(self.w_a)
+#         alpha = self.soft_max(z_i)
+#         alpha = alpha.unsqueeze(2)
+#         alpha = alpha.expand_as(M)
+#         return alpha * M
+
+class AttM(nn.Module):
+    def __init__(self, d):
+        super(AttM, self).__init__()
+        self.d = d
+        self.m_linear = nn.Linear(d, 256)
+        self.M_linear = nn.Linear(d, 256)
+        self.soft_max = nn.Softmax()
+        self.tanh = nn.Tanh()
+    
+    def forward(self, M, m):
+        # z_i = w_a.t x tanh(W_i x M_i + W_c x m_c x 1.t)
+        # W_i, W_c t*d
+        # M 8*512(d)*49(t) m 8*512  
+        t = M.size(2)
+        M = torch.transpose(M, 1, 2) # [8, 49, 512]
+        M = M.contiguous()
+        M = M.view(-1, self.d) # [8*49(t), 512(d)]
+        a1 = self.M_linear(M)
+        a2 = self.m_linear(m)
+        a1 = a1.view(-1, t, 256) # [8, 49, 256]
+        a2 = a2.unsqueeze(2) # [8, 256, 1]
+        z = torch.bmm(a1, a2).squeeze()
+        alpha = self.soft_max(z)
+        alpha = alpha.unsqueeze(2)
+        M = M.view(-1, t, self.d)
+        alpha = alpha.expand_as(M)
+        return alpha * M
+
+
+class ConcatM(nn.Module):
+    def __init__(self, d):
+        super(concatM, self).__init__()
+        self.d = d
+        self.W = nn.parameter.Parameter(torch.Tensor(d, 3 * d))
+        self.tanh = nn.Tanh()
+        
+        stdv = 1. / math.sqrt(self.d * 3)
+        self.W.data.uniform_(-stdv, stdv)
+    
+    def forward(self, m_q, m_t, m_i):
+        input = torch.cat((m_q, m_t, m_i), 1)
+        return self.tanh(input.matmul(self.W.t()))
