@@ -4,22 +4,38 @@ from parlai.core.dict import DictionaryAgent
 import torch
 from torch import optim
 from torch.autograd import Variable
+from torch.nn import CrossEntropyLoss
 
 import os
 import copy
 import random
 import numpy as np
+import datetime
 
-from modules import *
+from .modules import HCIAE, Decoder
 
-class HCIAEAgent(Agent):
+class HciaeAgent(Agent):
     """ HCIAEAgent.
     """
 
     @staticmethod
     def add_cmdline_args(argparser):
         DictionaryAgent.add_cmdline_args(argparser)
-        arg_group = argparser.add_cmdline_args('HCIAE Arguments')
+        arg_group = argparser.add_argument_group('HCIAE Arguments')
+        arg_group.add_argument('--dropout', type=float, default=.1, help='')
+        arg_group.add_argument('--embedding-size', type=int, default=512, help='')
+        arg_group.add_argument('--hidden-size', type=int, default=512, help='')
+        arg_group.add_argument('--no-cuda', action='store_true', default=False,
+                               help='disable GPUs even if available')
+        arg_group.add_argument('--gpu', type=int, default=-1,
+                               help='which GPU device to use')
+        arg_group.add_argument('--rnn-layers', type=int, default=2,
+            help='number of hidden layers in RNN decoder for generative output')
+        arg_group.add_argument('--optimizer', default='adam',
+            help='optimizer type (sgd|adam)')
+        arg_group.add_argument('-lr', '--learning-rate', type=float, default=0.01,
+                               help='learning rate')
+
 
     def __init__(self, opt, shared=None):
         super().__init__(opt, shared)
@@ -43,9 +59,27 @@ class HCIAEAgent(Agent):
 
             lr = opt['learning_rate']
 
+            self.loss_fn = CrossEntropyLoss()
+
             self.model = HCIAE(opt, self.dict)
-            #if opt['optimizer'] = 'sgd':
-                #self.optimizers = {'haciae': optim.SGD()}
+            self.decoder = Decoder(opt['hidden_size'], opt['hidden_size'], opt['rnn_layers'], opt, self.dict)
+
+            optim_params = [p for p in self.model.parameters() if p.requires_grad]
+            if opt['optimizer'] == 'sgd':
+                self.optimizers = {'hciae': optim.SGD(optim_params, lr=lr)}
+                if self.decoder is not None:
+                    self.optimizers['decoder'] = optim.SGD(self.decoder.parameters(), lr=lr)
+            elif opt['optimizer'] == 'adam':
+                self.optimizers = {'hciae': optim.Adam(optim_params, lr=lr)}
+                if self.decoder is not None:
+                    self.optimizers['decoder'] = optim.Adam(self.decoder.parameters(), lr=lr)
+            else:
+                raise NotImplementedError('Optimizer not supported.')
+
+
+            if opt['cuda']:
+                self.decoder.cuda()
+                self.loss_fn.cuda()
             
             if opt.get('model_file') and os.path.isfile(opt['model_file']):
                 print('Loading existing model parameters from ' + opt['model_file'])
@@ -55,8 +89,6 @@ class HCIAEAgent(Agent):
         self.episode_done = True
         self.img_feature = None
         self.last_cands, self.last_cands_list = None, None
-        
-    
     def share(self):
         shared = super().share()
         shared['answers'] = self.answers
@@ -115,7 +147,6 @@ class HCIAEAgent(Agent):
         valid_inds = [i for i, ex in enumerate(obs) if ('text' in ex and 'image' in ex)]
         if not exs:
             return [None] * 4
-        print(obs)
         images = torch.cat([torch.from_numpy(exs[i]['image']['x']).unsqueeze(0) for i in valid_inds])
         parsed = [self.parse(exs[i]['text']) for i in valid_inds]
         queries = torch.cat([x[0] for x in parsed])
@@ -131,13 +162,15 @@ class HCIAEAgent(Agent):
         start_idx = memory_lengths.numpy()[0].nonzero()[0][0]
         idx = 0
         memories_tensor = []
+        max_len = torch.max(memory_lengths)
+
         for i in range(batch_size):
             memory = []
             for j in range(start_idx, 10):
                 temp = []
                 length = memory_lengths[i][j]
-                temp = [memories[idx+i] for i in range(length)]
-                temp.extend([0] * (20-length))
+                temp = [memories[idx + i] for i in range(length)]
+                temp.extend([0] * (max_len - length))
                 idx += length
                 memory.append(temp)
             memories_tensor.append(memory)
@@ -173,34 +206,94 @@ class HCIAEAgent(Agent):
 
         return xs, ys, valid_inds
 
-    def predict(self, xs, cands, ys=None):
+    def predict(self, xs, ys=None):
         is_training = ys is not None
-        inputs = [Variable(x, volatile=is_training) for x in xs]
+        self.model.train(mode=is_training)
+        inputs = [Variable(x) for x in xs]
+        if self.opt['cuda']:
+            inputs = [input.cuda() for input in inputs]
         output = self.model(*inputs)
 
-        return output
+        self.decoder.train(mode=is_training)
+
+        output_lines, loss = self.decode(output, ys)
+        predictions = self.generated_predictions(output_lines)
+
+        if is_training:
+            for o in self.optimizers.values():
+                o.zero_grad()
+            loss.backward()
+            for o in self.optimizers.values():
+                o.step()
+            if random.random() < 0.1:
+                print('Loss: ', loss.data)
+        return predictions
     
 
     def decode(self, output_embeddings, ys=None):
+        # output_embedding [batich_size, hidden_size[
         batchsize = output_embeddings.size(0)
-        hn = output_embeddings.unsqueeze(0).expand(self.expand(
-            self.opt['rnn_layers'], batchsize, output_embeddings.size(1)))
+        hn = output_embeddings.unsqueeze(0).expand(
+            self.opt['rnn_layers'], batchsize, output_embeddings.size(1))
+        x = self.model.answer_embedder(Variable(self.START_TENSOR))
+        xes = x.unsqueeze(1).expand(x.size(0), batchsize, x.size(1))
 
+        loss = 0
+        output_lines =[[] for _ in range(batchsize)]
+        done = [False for _ in range(batchsize)]
+        total_done = 0
+        idx = 0
 
+        while (total_done < batchsize) and idx < self.longest_label:
+            # keep producing tokens until we hit END or max length for each ex
+            if self.opt['cuda']:
+                xes = xes.cuda()
+                hn = hn.contiguous()
+            #print('Before Decoder size - xes, hn', xes.size(), hn.size())
+            preds, scores = self.decoder(xes, hn)
+            if ys is not None:
+                y = Variable(ys[0][:, idx])
+                temp_y = y.cuda() if self.opt['cuda'] else y
+                loss += self.loss_fn(scores, temp_y)
+            else:
+                y = preds
+            # use the true token as the next input for better training
+            xes = self.model.answer_embedder(y).unsqueeze(0)
+
+            for b in  range(batchsize):
+                if not done[b]:
+                    token = self.dict.vec2txt([preds.data[b]])
+                    if token == self.END:
+                        done[b] = True
+                        total_done += 1
+                    else:
+                        output_lines[b].append(token)
+            idx += 1
+
+        return output_lines, loss
     def batch_act(self, observations):
+        start_time = datetime.datetime.now()
+
         batchsize = len(observations)
         batch_reply = [{'id': self.getID()} for _ in range(batchsize)]
 
-        xs, ys, cands, valid_inds = self.batchify(observations)
+        xs, ys, valid_inds = self.batchify(observations)
 
         if xs is None or len(xs[1]) == 0:
             return batch_reply
 
         # Either train or predict
-        predictions = self.predict(xs, cands, ys)
+        predictions = self.predict(xs, ys)
 
         for i in range(len(valid_inds)):
             #self.answers[valid_inds[i]] = predictions[i][0]
-            batch_reply[valid_inds[i]]['text'] = predictions
+            batch_reply[valid_inds[i]]['text'] = predictions[i][0]
             #batch_reply[valid_inds[i]]['text_candidates'] = predictions[i]
+        end_time = datetime.datetime.now()
+        if random.random() < 0.1:
+            print('Batchsize: ', batchsize, ' Spent time (ms): ', (end_time - start_time).microseconds)
         return batch_reply
+
+    def generated_predictions(self, output_lines):
+        return [[' '.join(c for c in o if c != self.END
+                        and c != self.dict.null_token)] for o in output_lines]
