@@ -41,6 +41,7 @@ class HistoryEncoder(nn.Module):
         if self.opt['cuda']:
             h0 = h0.cuda()
             c0 = c0.cuda()
+            lengths = lengths.cuda()
 
         # lengths [batch_size, memory_length]
         s_idx = lengths[0].nonzero()[0][0]
@@ -82,17 +83,24 @@ class QueryEncoder(nn.Module):
         self.embedding = nn.Embedding(len(dictionary), emb)
         self.q_encoder = nn.LSTM(emb, hsz, nlayer)
 
+        if opt['cuda']:
+            self.embedding.cuda()
+            self.q_encoder.cuda()
+
     def forward(self, input, lengths):
         batch_size = input.size(0)
-        queries = self.embedding(input)
-        data = sort_embeddings(queries, lengths.data)
-
         h0 = Variable(torch.zeros(self.num_layers, batch_size, self.hidden_size))
         c0 = Variable(torch.zeros(self.num_layers, batch_size, self.hidden_size))
-
         if self.opt['cuda']:
             h0 = h0.cuda()
             c0 = c0.cuda()
+            lengths = lengths.cuda()
+
+
+        queries = self.embedding(input)
+        data = sort_embeddings(queries, lengths.data)
+
+
 
         output, _ = self.q_encoder(data, (h0, c0))
         output, o_len = nn.utils.rnn.pad_packed_sequence(output)
@@ -215,12 +223,19 @@ class HCIAE(nn.Module):
             self.att_image.cuda()
             self.att_history.cuda()
             self.i_encoder.cuda()
+            self.qh_linear.cuda()
+            self.concatM.cuda()
+
+
     
     def forward(self, histories, queries, history_lengths, query_lengths, images):
+        images = images.cuda()
         images = self.i_encoder(images)
         #print('image size', images.size())
+        queries = queries.cuda()
         queries = self.q_encoder(queries, query_lengths)
         #print('Histories size before encode ', histories.size())
+        histories = histories.cuda()
         histories = self.H_encoder(histories, history_lengths)
         #print('Before History Attention - histories size, queries size', histories.size(), queries.size())
         histories = self.att_history(histories, queries)

@@ -5,12 +5,13 @@ import torch
 from torch import optim
 from torch.autograd import Variable
 from torch.nn import CrossEntropyLoss
+from tensorboardX import SummaryWriter
 
 import os
 import copy
 import random
 import numpy as np
-import datetime
+import time
 
 from .modules import HCIAE, Decoder
 
@@ -41,7 +42,7 @@ class HciaeAgent(Agent):
         super().__init__(opt, shared)
         opt['cuda'] = not opt['no_cuda'] and torch.cuda.is_available()
         if opt['cuda']:
-            print(['[Uding CUDA]'])
+            print('[Using CUDA]')
             torch.cuda.device(opt['gpu'])
         
         if not shared:
@@ -56,6 +57,8 @@ class HciaeAgent(Agent):
             self.START_TENSOR = torch.LongTensor(self.dict.parse(self.START))
             self.mem_size = 10
             self.longest_label = 1
+            self.writer = SummaryWriter()
+            self.writer_idx = 0
 
             lr = opt['learning_rate']
 
@@ -79,7 +82,6 @@ class HciaeAgent(Agent):
 
             if opt['cuda']:
                 self.decoder.cuda()
-                self.loss_fn.cuda()
             
             if opt.get('model_file') and os.path.isfile(opt['model_file']):
                 print('Loading existing model parameters from ' + opt['model_file'])
@@ -210,8 +212,6 @@ class HciaeAgent(Agent):
         is_training = ys is not None
         self.model.train(mode=is_training)
         inputs = [Variable(x) for x in xs]
-        if self.opt['cuda']:
-            inputs = [input.cuda() for input in inputs]
         output = self.model(*inputs)
 
         self.decoder.train(mode=is_training)
@@ -225,8 +225,18 @@ class HciaeAgent(Agent):
             loss.backward()
             for o in self.optimizers.values():
                 o.step()
-            if random.random() < 0.1:
-                print('Loss: ', loss.data)
+            self.writer_idx += 1
+            #print('Loss: ', loss.data[0])
+
+            #if self.writer_idx == 1:
+            #    self.writer.add_graph(self.model, output)
+
+            self.writer.add_histogram('loss', loss.data[0], self.writer_idx)
+            self.writer.add_embedding(output.data, tag='output', global_step=self.writer_idx)
+            if random.random() < 0.25:
+                label = self.dict.vec2txt(ys[0][0].tolist())
+                self.writer.add_text('prediction - label', ' '.join(predictions[0]) + ' --- ' + label, self.writer_idx)
+
         return predictions
     
 
@@ -272,8 +282,6 @@ class HciaeAgent(Agent):
 
         return output_lines, loss
     def batch_act(self, observations):
-        start_time = datetime.datetime.now()
-
         batchsize = len(observations)
         batch_reply = [{'id': self.getID()} for _ in range(batchsize)]
 
@@ -289,11 +297,23 @@ class HciaeAgent(Agent):
             #self.answers[valid_inds[i]] = predictions[i][0]
             batch_reply[valid_inds[i]]['text'] = predictions[i][0]
             #batch_reply[valid_inds[i]]['text_candidates'] = predictions[i]
-        end_time = datetime.datetime.now()
-        if random.random() < 0.1:
-            print('Batchsize: ', batchsize, ' Spent time (ms): ', (end_time - start_time).microseconds)
         return batch_reply
 
     def generated_predictions(self, output_lines):
         return [[' '.join(c for c in o if c != self.END
                         and c != self.dict.null_token)] for o in output_lines]
+
+    def save(self, path=None):
+        path = self.opt.get('model_file', None) if path is None else path
+        now_time = time.strftime('%m-%d %H:%M', time.localtime(time.time()))
+        path = path + how_time + '.model'
+        if path:
+            checkpoint = {}
+            checkpoint['hciae'] = self.model.state_dict()
+            checkpoint['hciae_optim'] = self.optimizers['memnn'].state_dict()
+            if self.decoder is not None:
+                checkpoint['decoder'] = self.decoder.state_dict()
+                checkpoint['decoder_optim'] = self.optimizers['decoder'].state_dict()
+                checkpoint['longest_label'] = self.longest_label
+            with open(path, 'wb') as write:
+                torch.save(checkpoint, write)
