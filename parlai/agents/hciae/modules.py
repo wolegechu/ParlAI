@@ -100,8 +100,6 @@ class QueryEncoder(nn.Module):
         queries = self.embedding(input)
         data = sort_embeddings(queries, lengths.data)
 
-
-
         output, _ = self.q_encoder(data, (h0, c0))
         output, o_len = nn.utils.rnn.pad_packed_sequence(output)
         output_embedding = torch.cat([output.transpose(0, 1)[i][o_len[i]-1].unsqueeze(0) for i in range(batch_size)])
@@ -174,7 +172,6 @@ class AttM(nn.Module):
         a1 = a1.view(-1, t, 256) # [8, 49, 256]
         a2 = a2.unsqueeze(2) # [8, 256, 1]
         z = torch.bmm(a1, a2).squeeze()
-
         if z.dim() == 1:
             z = z.unsqueeze(1)
 

@@ -4,6 +4,7 @@ from parlai.core.dict import DictionaryAgent
 import torch
 from torch import optim
 from torch.autograd import Variable
+
 from torch.nn import CrossEntropyLoss
 from tensorboardX import SummaryWriter
 
@@ -11,11 +12,12 @@ import os
 import copy
 import random
 import numpy as np
+
 import time
 
 from .modules import HCIAE, Decoder
 
-class HciaeAgent(Agent):
+class HCIAEAgent(Agent):
     """ HCIAEAgent.
     """
 
@@ -36,7 +38,6 @@ class HciaeAgent(Agent):
             help='optimizer type (sgd|adam)')
         arg_group.add_argument('-lr', '--learning-rate', type=float, default=0.01,
                                help='learning rate')
-
 
     def __init__(self, opt, shared=None):
         super().__init__(opt, shared)
@@ -165,7 +166,6 @@ class HciaeAgent(Agent):
         idx = 0
         memories_tensor = []
         max_len = torch.max(memory_lengths)
-
         for i in range(batch_size):
             memory = []
             for j in range(start_idx, 10):
@@ -191,9 +191,7 @@ class HciaeAgent(Agent):
             idx += length
             queries_tensor.append(temp)
         queries_tensor = torch.from_numpy(np.array(queries_tensor))
-
         xs = [memories_tensor, queries_tensor, memory_lengths, query_lengths, images]
-
         ys = None
         self.labels = [random.choice(ex['labels']) for ex in exs if 'labels' in ex]
         if len(self.labels) == len(exs):
@@ -284,7 +282,6 @@ class HciaeAgent(Agent):
     def batch_act(self, observations):
         batchsize = len(observations)
         batch_reply = [{'id': self.getID()} for _ in range(batchsize)]
-
         xs, ys, valid_inds = self.batchify(observations)
 
         if xs is None or len(xs[1]) == 0:
@@ -306,7 +303,7 @@ class HciaeAgent(Agent):
     def save(self, path=None):
         path = self.opt.get('model_file', None) if path is None else path
         now_time = time.strftime('%m-%d %H:%M', time.localtime(time.time()))
-        path = path + how_time + '.model'
+        path = path + now_time + '.model'
         if path:
             checkpoint = {}
             checkpoint['hciae'] = self.model.state_dict()
