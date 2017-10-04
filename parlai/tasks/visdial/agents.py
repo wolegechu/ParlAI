@@ -89,4 +89,4 @@ class DefaultTeacher(DialogTeacher):
                     # only load image on first item
                     yield (caption + '\n' + question, answer, None, answer_options, img_path), episode_done
                 else:
-                    yield (question, answer, None, answer_options), episode_done
+                    yield (question, answer, None, answer_options, img_path), episode_done
