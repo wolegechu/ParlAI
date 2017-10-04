@@ -2,25 +2,30 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 
+import math
+
 class HistoryEncoder(nn.Module):
     def __init__(self, opt, dictionary):
-        
-        emb = opt['embeddingsize']
-        hsz = opt['hiddensize']
-        nlayer = opt['numlayers']
+        super(HistoryEncoder, self).__init__()
+        emb = opt['embedding_size']
+        hsz = opt['hidden_size']
+        nlayer = opt['rnn_layers']
 
+        self.opt = opt
         self.embedding_size = emb
         self.hidden_size = hsz
         self.num_layers = nlayer
 
         self.embedding = nn.Embedding(len(dictionary), emb)
         self.h_encoder = nn.LSTM(emb, hsz, nlayer)
-        super().__init__(opt, dictionary)
 
     def forward(self, input, lengths):
         # input: [batch_size, memory_length, max_sentence_length]
+        # lengths: Variable
         # output:
         #   history: [batch_size, memory_length, hidden_size]
+
+        lengths = lengths.data
         memory_embeddings = []
         for i in range(input.size(0)):
             memory = self.embedding(input[i])
@@ -33,8 +38,13 @@ class HistoryEncoder(nn.Module):
         h0 = Variable(torch.zeros(self.num_layers, batch_size, self.hidden_size))
         c0 = Variable(torch.zeros(self.num_layers, batch_size, self.hidden_size))
 
+        if self.opt['cuda']:
+            h0 = h0.cuda()
+            c0 = c0.cuda()
+            lengths = lengths.cuda()
+
         # lengths [batch_size, memory_length]
-        s_idx = lengths.numpy()[0].nonzero()[0][0]
+        s_idx = lengths[0].nonzero()[0][0]
         lengths = lengths[:, s_idx:]
         history = []
 
@@ -53,39 +63,59 @@ class HistoryEncoder(nn.Module):
         return history
 
 def sort_embeddings(embeddings, lens):
+    # lens Variable
     lens, perm_idx = lens.sort(0, descending=True)
     embeddings = embeddings[perm_idx]
     data = nn.utils.rnn.pack_padded_sequence(embeddings, lens.tolist(), batch_first=True)
     return data
 
-
 class QueryEncoder(nn.Module):
     def __init__(self, opt, dictionary):
-        super().__init__()
-        emb = opt['embeddingsize']
-        hsz = opt['hiddensize']
-        nlayer = opt['numlayers']
-        
+        super(QueryEncoder, self).__init__()
+        emb = opt['embedding_size']
+        hsz = opt['hidden_size']
+        nlayer = opt['rnn_layers']
+
+        self.opt = opt
         self.num_layers = nlayer
         self.hidden_size = hsz
 
         self.embedding = nn.Embedding(len(dictionary), emb)
         self.q_encoder = nn.LSTM(emb, hsz, nlayer)
 
+        if opt['cuda']:
+            self.embedding.cuda()
+            self.q_encoder.cuda()
+
     def forward(self, input, lengths):
         batch_size = input.size(0)
-        print(input.size())
-        queries = self.embedding(input)
-        data = sort_embeddings(queries, lengths)
-
         h0 = Variable(torch.zeros(self.num_layers, batch_size, self.hidden_size))
         c0 = Variable(torch.zeros(self.num_layers, batch_size, self.hidden_size))
+        if self.opt['cuda']:
+            h0 = h0.cuda()
+            c0 = c0.cuda()
+            lengths = lengths.cuda()
+
+
+        queries = self.embedding(input)
+        data = sort_embeddings(queries, lengths.data)
 
         output, _ = self.q_encoder(data, (h0, c0))
         output, o_len = nn.utils.rnn.pad_packed_sequence(output)
         output_embedding = torch.cat([output.transpose(0, 1)[i][o_len[i]-1].unsqueeze(0) for i in range(batch_size)])
 
         return output_embedding
+
+class ImageEncoder(nn.Module):
+    def __init__(self):
+        super(ImageEncoder, self).__init__()
+        self.conv = nn.Conv2d(2048, 512, 2, 2)
+
+    def forward(self, input):
+        batch_size = input.size(0)
+        img = self.conv(input)
+        img = img.view(batch_size, 512, -1)
+        return img
 
 # class AttM(nn.Module):
 #     def __init__(self, t, d):
@@ -133,9 +163,8 @@ class AttM(nn.Module):
     def forward(self, M, m):
         # z_i = w_a.t x tanh(W_i x M_i + W_c x m_c x 1.t)
         # W_i, W_c t*d
-        # M 8*512(d)*49(t) m 8*512  
-        t = M.size(2)
-        M = torch.transpose(M, 1, 2) # [8, 49, 512]
+        # M 8*49(t)*512(d) m 8*512
+        t = M.size(1)
         M = M.contiguous()
         M = M.view(-1, self.d) # [8*49(t), 512(d)]
         a1 = self.M_linear(M)
@@ -143,16 +172,21 @@ class AttM(nn.Module):
         a1 = a1.view(-1, t, 256) # [8, 49, 256]
         a2 = a2.unsqueeze(2) # [8, 256, 1]
         z = torch.bmm(a1, a2).squeeze()
+        if z.dim() == 1:
+            z = z.unsqueeze(1)
+
         alpha = self.soft_max(z)
         alpha = alpha.unsqueeze(2)
         M = M.view(-1, t, self.d)
         alpha = alpha.expand_as(M)
-        return alpha * M
+        output = alpha * M
+        output = output.sum(dim=1)
+        return output
 
 
 class ConcatM(nn.Module):
     def __init__(self, d):
-        super(concatM, self).__init__()
+        super(ConcatM, self).__init__()
         self.d = d
         self.W = nn.parameter.Parameter(torch.Tensor(d, 3 * d))
         self.tanh = nn.Tanh()
@@ -163,3 +197,73 @@ class ConcatM(nn.Module):
     def forward(self, m_q, m_t, m_i):
         input = torch.cat((m_q, m_t, m_i), 1)
         return self.tanh(input.matmul(self.W.t()))
+
+class HCIAE(nn.Module):
+    def __init__(self, opt, dictionary):
+        super(HCIAE, self).__init__()
+        self.opt = opt
+
+        hsz = opt['hidden_size']
+        emb = opt['embedding_size']
+        self.answer_embedder = nn.Embedding(len(dictionary), emb)
+        self.q_encoder = QueryEncoder(opt, dictionary)
+        self.H_encoder = HistoryEncoder(opt, dictionary)
+        self.att_image = AttM(hsz)
+        self.att_history = AttM(hsz)
+        self.i_encoder = ImageEncoder()
+        self.qh_linear = nn.Linear(2 * hsz, hsz)
+        self.concatM = ConcatM(hsz)
+
+        if opt['cuda']:
+            self.q_encoder.cuda()
+            self.H_encoder.cuda()
+            self.att_image.cuda()
+            self.att_history.cuda()
+            self.i_encoder.cuda()
+            self.qh_linear.cuda()
+            self.concatM.cuda()
+
+
+    
+    def forward(self, histories, queries, history_lengths, query_lengths, images):
+        images = images.cuda()
+        images = self.i_encoder(images)
+        #print('image size', images.size())
+        queries = queries.cuda()
+        queries = self.q_encoder(queries, query_lengths)
+        #print('Histories size before encode ', histories.size())
+        histories = histories.cuda()
+        histories = self.H_encoder(histories, history_lengths)
+        #print('Before History Attention - histories size, queries size', histories.size(), queries.size())
+        histories = self.att_history(histories, queries)
+
+        query_to_image = torch.cat((histories, queries), 1)
+        query_to_image = self.qh_linear(query_to_image)
+
+        #print('Before Image Attention - image size, queries size', images.size(), query_to_image.size())
+        images = self.att_image(images.transpose(1, 2), query_to_image)
+        output = self.concatM(queries, histories, images)
+        return output
+
+class Decoder(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, opt, dictionary):
+        super().__init__()
+        self.dict = dictionary
+        self.h2o = nn.Linear(hidden_size, len(dictionary))
+        self.dropout = nn.Dropout(opt['dropout'])
+        self.rnn = nn.GRU(input_size, hidden_size, num_layers)
+
+    def hidden_to_idx(self, hidden, dropout=False):
+        """Converts hidden state vectors into indices into the dictionary."""
+        if hidden.size(0) > 1:
+            raise RuntimeError('Bad dimensions of tensor:', hidden)
+        hidden = hidden.squeeze(0)
+        scores = self.h2o(hidden)
+        if dropout:
+            scores = self.dropout(scores)
+        _, idx = scores.max(1)
+        return idx, scores
+
+    def forward(self, input, state):
+        output, state = self.rnn(input, state)
+        return self.hidden_to_idx(output, dropout=self.training)

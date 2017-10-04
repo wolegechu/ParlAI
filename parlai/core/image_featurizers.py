@@ -133,6 +133,8 @@ class ImageLoader():
         elif mode == 'ascii':
             # convert images to ascii ¯\_(ツ)_/¯
             return self.img_to_ascii(path)
+        elif mode == 'npy':
+            return np.load(path)
         else:
             # otherwise, looks for preprocessed version under 'mode' directory
             prepath, imagefn = os.path.split(path)
